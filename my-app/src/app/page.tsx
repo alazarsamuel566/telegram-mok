@@ -8,6 +8,7 @@ export default function Home() {
   const wheelTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const animationFrameRef = useRef<number | null>(null)
   const isAnimatingRef = useRef(false)
+  const lockedTargetRef = useRef<number | null>(null)
   const maxScroll = 120
 
   const stories = [
@@ -50,14 +51,28 @@ export default function Home() {
     { name: 'Zack Moore', message: 'Great presentation today!', time: 'Jan 9', unread: 0, online: false },
   ]
 
-  // Animate to target
-  const animateToTarget = useCallback((targetScroll: number, quick: boolean = false) => {
+  // Animate to target scroll - always completes fully
+  const animateToTarget = useCallback((targetScroll: number, duration: number = 200, startFrom?: number) => {
     const container = chatContainerRef.current
-    if (!container || isAnimatingRef.current) return
+    if (!container) return
 
+    // If already animating to the same target, let it continue
+    if (isAnimatingRef.current && lockedTargetRef.current === targetScroll) {
+      return
+    }
+
+    // Cancel any existing animation only if target is different
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = null
+    }
+
+    // Lock the target for this animation
+    lockedTargetRef.current = targetScroll
     isAnimatingRef.current = true
-    const startScroll = container.scrollTop
-    const duration = quick ? 200 : 350
+    
+    // Use provided start position or read from container
+    const startScroll = startFrom !== undefined ? startFrom : container.scrollTop
     const startTime = performance.now()
 
     const animate = (currentTime: number) => {
@@ -65,18 +80,21 @@ export default function Home() {
       const rawProgress = Math.min(elapsed / duration, 1)
       // Smooth ease-out cubic
       const eased = 1 - Math.pow(1 - rawProgress, 3)
-      const currentScroll = startScroll + (targetScroll - startScroll) * eased
+      const target = lockedTargetRef.current!
+      const currentScroll = startScroll + (target - startScroll) * eased
       
+      // Set both together
       container.scrollTop = currentScroll
       setScrollY(currentScroll)
 
       if (rawProgress < 1) {
         animationFrameRef.current = requestAnimationFrame(animate)
       } else {
-        // Ensure we reach exact target
-        container.scrollTop = targetScroll
-        setScrollY(targetScroll)
+        // Ensure exact target is reached
+        container.scrollTop = target
+        setScrollY(target)
         isAnimatingRef.current = false
+        lockedTargetRef.current = null
       }
     }
 
@@ -84,61 +102,24 @@ export default function Home() {
   }, [])
 
   // Snap to nearest edge
-  const snapToNearest = useCallback((quick: boolean = false) => {
+  const snapToNearest = useCallback(() => {
     const container = chatContainerRef.current
-    if (!container || isAnimatingRef.current) return
+    if (!container) return
 
     const currentScroll = container.scrollTop
     if (currentScroll <= 0 || currentScroll >= maxScroll) return
 
     const progress = currentScroll / maxScroll
     const targetScroll = progress >= 0.5 ? maxScroll : 0
-    animateToTarget(targetScroll, quick)
+    
+    // Animate directly with current scroll as start position
+    animateToTarget(targetScroll, 250, currentScroll)
   }, [animateToTarget])
 
-  // Handle scroll
+  // Handle scroll event
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     if (isAnimatingRef.current) return
     setScrollY(e.currentTarget.scrollTop)
-  }
-  
-  // Handle wheel
-  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    const container = chatContainerRef.current
-    if (!container || isAnimatingRef.current) return
-
-    const currentScroll = container.scrollTop
-    const delta = Math.abs(e.deltaY)
-    
-    // Clear existing timeout
-    if (wheelTimeoutRef.current) {
-      clearTimeout(wheelTimeoutRef.current)
-      wheelTimeoutRef.current = null
-    }
-
-    // Mouse wheel: large delta (>= 50) - snap immediately
-    if (delta >= 50) {
-      if (currentScroll <= maxScroll) {
-        const targetScroll = e.deltaY > 0 ? maxScroll : 0
-        if ((targetScroll === maxScroll && currentScroll < maxScroll) ||
-            (targetScroll === 0 && currentScroll > 0)) {
-          animateToTarget(targetScroll, true)
-        }
-      }
-    } 
-    // Touchpad: small delta (< 50)
-    else if (currentScroll <= maxScroll && currentScroll > 0) {
-      // Snap when wheel events stop
-      wheelTimeoutRef.current = setTimeout(() => {
-        const container = chatContainerRef.current
-        if (container && !isAnimatingRef.current) {
-          const scroll = container.scrollTop
-          if (scroll > 0 && scroll < maxScroll) {
-            snapToNearest(false)
-          }
-        }
-      }, 80)
-    }
   }
 
   // Touch screen
@@ -148,14 +129,92 @@ export default function Home() {
     
     if (container.scrollTop > 0 && container.scrollTop < maxScroll) {
       setTimeout(() => {
-        snapToNearest(false)
+        snapToNearest()
       }, 30)
     }
   }
 
   // Cleanup
   useEffect(() => {
+    const container = chatContainerRef.current
+    if (!container) return
+    
+    let lastScrollPosition = 0
+    let stabilityCount = 0
+
+    const handleNativeWheel = (e: WheelEvent) => {
+      const currentScroll = container.scrollTop
+      const delta = Math.abs(e.deltaY)
+      const scrollingDown = e.deltaY > 0
+      const scrollingUp = e.deltaY < 0
+
+      // If animating, prevent any wheel interference
+      if (isAnimatingRef.current) {
+        e.preventDefault()
+        return
+      }
+
+      // Clear existing timeout
+      if (wheelTimeoutRef.current) {
+        clearTimeout(wheelTimeoutRef.current)
+        wheelTimeoutRef.current = null
+      }
+
+      // Mouse wheel: large delta (>= 50)
+      if (delta >= 50) {
+        // Scrolling down - animate to maxScroll (collapse stories)
+        if (scrollingDown && currentScroll < maxScroll) {
+          e.preventDefault()
+          animateToTarget(maxScroll, 180)
+        }
+        // Scrolling up - animate to 0 (expand stories)
+        else if (scrollingUp && currentScroll <= maxScroll + 50 && currentScroll > 0) {
+          e.preventDefault()
+          animateToTarget(0, 180)
+        }
+      }
+      // Touchpad: small delta (< 50)
+      else if (currentScroll > 0 && currentScroll < maxScroll) {
+        // Reset stability counter on each wheel event
+        stabilityCount = 0
+        lastScrollPosition = currentScroll
+        
+        // Snap when wheel events stop AND scroll is stable
+        const checkAndSnap = (capturedPosition: number) => {
+          const scrollNow = container.scrollTop
+          
+          // Check if scroll position is stable
+          if (Math.abs(scrollNow - lastScrollPosition) < 0.5) {
+            stabilityCount++
+            if (stabilityCount >= 2) {
+              // Scroll is stable, now snap from captured position
+              if (scrollNow > 0 && scrollNow < maxScroll && !isAnimatingRef.current) {
+                const progress = scrollNow / maxScroll
+                const targetScroll = progress >= 0.5 ? maxScroll : 0
+                // Use longer duration for smoother snap
+                animateToTarget(targetScroll, 300, scrollNow)
+              }
+              return
+            }
+          } else {
+            // Position changed, reset
+            stabilityCount = 0
+            lastScrollPosition = scrollNow
+          }
+          
+          // Continue checking
+          wheelTimeoutRef.current = setTimeout(() => checkAndSnap(scrollNow), 30)
+        }
+        
+        // Initial delay before starting stability check
+        wheelTimeoutRef.current = setTimeout(() => checkAndSnap(currentScroll), 50)
+      }
+    }
+
+    container.addEventListener('wheel', handleNativeWheel, { passive: false })
+
     return () => {
+      container.removeEventListener('wheel', handleNativeWheel)
       if (wheelTimeoutRef.current) {
         clearTimeout(wheelTimeoutRef.current)
       }
@@ -163,7 +222,7 @@ export default function Home() {
         cancelAnimationFrame(animationFrameRef.current)
       }
     }
-  }, [])
+  }, [animateToTarget, snapToNearest])
 
   // Animation calculations
   const progress = Math.min(scrollY / maxScroll, 1)
@@ -293,7 +352,6 @@ export default function Home() {
         <div 
           ref={chatContainerRef}
           onScroll={handleScroll}
-          onWheel={handleWheel}
           onTouchEnd={handleTouchEnd}
           style={{
             flex: 1,
