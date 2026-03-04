@@ -10,6 +10,8 @@ export default function Home() {
   const isAnimatingRef = useRef(false)
   const lockedTargetRef = useRef<number | null>(null)
   const maxScroll = 120
+  const isTouchingRef = useRef(false) // Track if user is currently touching screen
+  const touchEndScrollCheckRef = useRef<NodeJS.Timeout | null>(null) // For touch screen scroll stop detection
 
   const stories = [
     { name: 'You', color: '#3b82f6' },
@@ -71,7 +73,7 @@ export default function Home() {
     lockedTargetRef.current = targetScroll
     isAnimatingRef.current = true
     
-    // Use provided start position or read from container
+    // Read current position at this exact moment
     const startScroll = startFrom !== undefined ? startFrom : container.scrollTop
     const startTime = performance.now()
 
@@ -90,7 +92,7 @@ export default function Home() {
       if (rawProgress < 1) {
         animationFrameRef.current = requestAnimationFrame(animate)
       } else {
-        // Ensure exact target is reached
+        // Ensure exact target is reached - always!
         container.scrollTop = target
         setScrollY(target)
         isAnimatingRef.current = false
@@ -122,46 +124,90 @@ export default function Home() {
     setScrollY(e.currentTarget.scrollTop)
   }
 
-  // Touch screen
-  const handleTouchEnd = () => {
-    const container = chatContainerRef.current
-    if (!container || isAnimatingRef.current) return
-    
-    if (container.scrollTop > 0 && container.scrollTop < maxScroll) {
-      setTimeout(() => {
-        snapToNearest()
-      }, 30)
+  // Touch screen handling - track touch state
+  const handleTouchStart = () => {
+    isTouchingRef.current = true
+    // Clear any pending touch end scroll check
+    if (touchEndScrollCheckRef.current) {
+      clearTimeout(touchEndScrollCheckRef.current)
+      touchEndScrollCheckRef.current = null
     }
   }
 
-  // Cleanup
+  const handleTouchMove = () => {
+    // User is still touching and moving
+    // Clear any pending snap from previous touch end
+    if (touchEndScrollCheckRef.current) {
+      clearTimeout(touchEndScrollCheckRef.current)
+      touchEndScrollCheckRef.current = null
+    }
+  }
+
+  const handleTouchEnd = () => {
+    // User lifted finger - snap immediately
+    isTouchingRef.current = false
+    
+    const container = chatContainerRef.current
+    if (!container || isAnimatingRef.current) return
+    
+    const currentPos = container.scrollTop
+    
+    // Immediately snap to nearest edge if in animation zone
+    if (currentPos > 0 && currentPos < maxScroll) {
+      const progress = currentPos / maxScroll
+      const targetScroll = progress >= 0.5 ? maxScroll : 0
+      animateToTarget(targetScroll, 250, currentPos)
+    }
+  }
+
+  // Wheel event handling
   useEffect(() => {
     const container = chatContainerRef.current
     if (!container) return
-    
+
     let lastScrollPosition = 0
     let stabilityCount = 0
+    let scrollEndTimeout: NodeJS.Timeout | null = null
 
     const handleNativeWheel = (e: WheelEvent) => {
+      // If user is touching the screen, ignore wheel events (touch screen momentum)
+      if (isTouchingRef.current) {
+        return
+      }
+
       const currentScroll = container.scrollTop
       const delta = Math.abs(e.deltaY)
       const scrollingDown = e.deltaY > 0
       const scrollingUp = e.deltaY < 0
 
-      // If animating, prevent any wheel interference
-      if (isAnimatingRef.current) {
-        e.preventDefault()
-        return
-      }
-
-      // Clear existing timeout
+      // Clear existing timeouts
       if (wheelTimeoutRef.current) {
         clearTimeout(wheelTimeoutRef.current)
         wheelTimeoutRef.current = null
       }
+      if (scrollEndTimeout) {
+        clearTimeout(scrollEndTimeout)
+        scrollEndTimeout = null
+      }
 
       // Mouse wheel: large delta (>= 50)
       if (delta >= 50) {
+        // Determine target based on scroll direction
+        const targetScroll = scrollingDown ? maxScroll : 0
+        
+        // If animating, only continue if same target, otherwise redirect
+        if (isAnimatingRef.current) {
+          if (lockedTargetRef.current !== targetScroll) {
+            // Direction changed, start new animation to new target
+            e.preventDefault()
+            animateToTarget(targetScroll, 180)
+          } else {
+            // Same direction, just prevent and let animation continue
+            e.preventDefault()
+          }
+          return
+        }
+
         // Scrolling down - animate to maxScroll (collapse stories)
         if (scrollingDown && currentScroll < maxScroll) {
           e.preventDefault()
@@ -174,25 +220,28 @@ export default function Home() {
         }
       }
       // Touchpad: small delta (< 50)
-      else if (currentScroll > 0 && currentScroll < maxScroll) {
+      else {
         // Reset stability counter on each wheel event
         stabilityCount = 0
         lastScrollPosition = currentScroll
         
-        // Snap when wheel events stop AND scroll is stable
-        const checkAndSnap = (capturedPosition: number) => {
+        // For touchpad, always check if we're in the animation zone after scroll stops
+        const checkAndSnap = () => {
           const scrollNow = container.scrollTop
           
           // Check if scroll position is stable
           if (Math.abs(scrollNow - lastScrollPosition) < 0.5) {
             stabilityCount++
             if (stabilityCount >= 2) {
-              // Scroll is stable, now snap from captured position
+              // Scroll is stable, check if in animation zone
               if (scrollNow > 0 && scrollNow < maxScroll && !isAnimatingRef.current) {
+                // In animation zone - snap to nearest edge
                 const progress = scrollNow / maxScroll
                 const targetScroll = progress >= 0.5 ? maxScroll : 0
-                // Use longer duration for smoother snap
-                animateToTarget(targetScroll, 300, scrollNow)
+                animateToTarget(targetScroll, 250, scrollNow)
+              } else if (scrollNow >= maxScroll && scrollNow <= maxScroll + 30 && !isAnimatingRef.current) {
+                // Slightly above animation zone - snap to maxScroll
+                animateToTarget(maxScroll, 250, scrollNow)
               }
               return
             }
@@ -203,23 +252,60 @@ export default function Home() {
           }
           
           // Continue checking
-          wheelTimeoutRef.current = setTimeout(() => checkAndSnap(scrollNow), 30)
+          wheelTimeoutRef.current = setTimeout(() => checkAndSnap(), 30)
         }
         
-        // Initial delay before starting stability check
-        wheelTimeoutRef.current = setTimeout(() => checkAndSnap(currentScroll), 50)
+        // Start stability check after short delay
+        wheelTimeoutRef.current = setTimeout(() => checkAndSnap(), 50)
+      }
+    }
+    
+    // Also handle scroll end via onscroll event (catches momentum scroll end)
+    // This is for touchpad momentum scroll - NOT for touch screen
+    const handleScrollEnd = () => {
+      // Don't snap if user is still touching screen (touch screen)
+      if (isAnimatingRef.current || isTouchingRef.current) return
+
+      const currentScroll = container.scrollTop
+
+      // If in animation zone, ensure we snap
+      if (currentScroll > 0 && currentScroll < maxScroll) {
+        const progress = currentScroll / maxScroll
+        const targetScroll = progress >= 0.5 ? maxScroll : 0
+        animateToTarget(targetScroll, 250, currentScroll)
       }
     }
 
     container.addEventListener('wheel', handleNativeWheel, { passive: false })
 
+    // Use scroll event to catch momentum scroll end
+    // This is mainly for touchpad momentum scrolling
+    let scrollTimer: NodeJS.Timeout | null = null
+    const onScrollEvent = () => {
+      // Don't process if user is touching (touch screen has its own handler)
+      if (isTouchingRef.current) return
+
+      if (scrollTimer) clearTimeout(scrollTimer)
+      scrollTimer = setTimeout(() => {
+        handleScrollEnd()
+      }, 150)
+    }
+    container.addEventListener('scroll', onScrollEvent, { passive: true })
+
     return () => {
       container.removeEventListener('wheel', handleNativeWheel)
+      container.removeEventListener('scroll', onScrollEvent)
       if (wheelTimeoutRef.current) {
         clearTimeout(wheelTimeoutRef.current)
       }
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current)
+      }
+      if (scrollTimer) {
+        clearTimeout(scrollTimer)
+      }
+      if (touchEndScrollCheckRef.current) {
+        clearTimeout(touchEndScrollCheckRef.current)
       }
     }
   }, [animateToTarget, snapToNearest])
@@ -349,9 +435,11 @@ export default function Home() {
         }} />
 
         {/* Chat Section */}
-        <div 
+        <div
           ref={chatContainerRef}
           onScroll={handleScroll}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
           style={{
             flex: 1,
