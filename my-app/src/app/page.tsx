@@ -60,13 +60,14 @@ export default function Home() {
 
     isAnimatingRef.current = true
     const startScroll = container.scrollTop
-    const duration = quick ? 200 : 300
+    const duration = quick ? 200 : 350
     const startTime = performance.now()
 
     const animate = (currentTime: number) => {
       const elapsed = currentTime - startTime
       const rawProgress = Math.min(elapsed / duration, 1)
-      const eased = 1 - Math.pow(1 - rawProgress, 4)
+      // Smooth ease-out cubic
+      const eased = 1 - Math.pow(1 - rawProgress, 3)
       const currentScroll = startScroll + (targetScroll - startScroll) * eased
       
       container.scrollTop = currentScroll
@@ -75,6 +76,9 @@ export default function Home() {
       if (rawProgress < 1) {
         animationFrameRef.current = requestAnimationFrame(animate)
       } else {
+        // Ensure we reach exact target
+        container.scrollTop = targetScroll
+        setScrollY(targetScroll)
         isAnimatingRef.current = false
       }
     }
@@ -130,7 +134,7 @@ export default function Home() {
     else if (currentScroll <= maxScroll && currentScroll > 0) {
       isTouchpadRef.current = true
       
-      // Wait for wheel events to stop, then snap immediately
+      // Snap when wheel events stop with smooth animation
       wheelTimeoutRef.current = setTimeout(() => {
         const container = chatContainerRef.current
         if (container && !isAnimatingRef.current) {
@@ -139,7 +143,7 @@ export default function Home() {
             snapToNearest(false)
           }
         }
-      }, 10)
+      }, 100)
     }
   }
 
