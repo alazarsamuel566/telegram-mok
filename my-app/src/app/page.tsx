@@ -9,9 +9,6 @@ export default function Home() {
   const animationFrameRef = useRef<number | null>(null)
   const isAnimatingRef = useRef(false)
   const maxScroll = 120
-  
-  // Track touchpad state
-  const isTouchpadRef = useRef(false)
 
   const stories = [
     { name: 'You', color: '#3b82f6' },
@@ -121,7 +118,6 @@ export default function Home() {
 
     // Mouse wheel: large delta (>= 50) - snap immediately
     if (delta >= 50) {
-      isTouchpadRef.current = false
       if (currentScroll <= maxScroll) {
         const targetScroll = e.deltaY > 0 ? maxScroll : 0
         if ((targetScroll === maxScroll && currentScroll < maxScroll) ||
@@ -130,11 +126,9 @@ export default function Home() {
         }
       }
     } 
-    // Touchpad: small delta (< 50) - snap when wheel events stop
+    // Touchpad: small delta (< 50)
     else if (currentScroll <= maxScroll && currentScroll > 0) {
-      isTouchpadRef.current = true
-      
-      // Snap when wheel events stop with smooth animation
+      // Snap when wheel events stop
       wheelTimeoutRef.current = setTimeout(() => {
         const container = chatContainerRef.current
         if (container && !isAnimatingRef.current) {
@@ -143,7 +137,7 @@ export default function Home() {
             snapToNearest(false)
           }
         }
-      }, 100)
+      }, 80)
     }
   }
 
