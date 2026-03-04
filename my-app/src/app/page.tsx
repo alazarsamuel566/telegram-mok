@@ -139,7 +139,7 @@ export default function Home() {
             snapToNearest(false)
           }
         }
-      }, 50)
+      }, 10)
     }
   }
 
